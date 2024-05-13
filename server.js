@@ -57,8 +57,9 @@ app.get("/users/registrarservicio", (req, res) => {
   res.render("registrarservicio.ejs", { user: req.user });
 });
 
-app.get("/users/reservas", (req, res) => {
-  res.render("reservas.ejs", { user: req.user });
+
+app.get("/users/reservas/:id", (req, res) => {
+  res.render("reservas.ejs", { user: req.user, id: req.params.id });
 });
 
 app.get("/users/profile", checkNotAuthenticated, (req, res) => {
@@ -440,19 +441,41 @@ app.get("/api/infouser/:id", async (req, res) => {
 
   try {
     const userData = await pool.query(
-      "SELECT * FROM users WHERE id = $1;",
-      [userId]
+        "SELECT * FROM users WHERE id = $1;",
+        [userId]
     );
 
     if (userData.rows.length === 0) {
-      return res.status(404).json({ message: "Usuario no encontrado" });
+      return res.status(404).json({message: "Usuario no encontrado"});
     }
 
     res.json(userData.rows[0]);
   } catch (error) {
     console.error("Error al obtener información del usuario:", error);
-    res.status(500).json({ error: "Error al obtener información del usuario" });
+    res.status(500).json({error: "Error al obtener información del usuario"});
   }
 });
+
+
+  app.get("/api/solicitudById/:id", async (req, res) => {
+    const solicitudId = req.params.id;
+
+    try {
+      const solicitudData = await pool.query(
+          "SELECT s.solicitud_id, s.materia, s.tema_interes, s.fecha_reunion, s.user_data  -> 'id' as idPersona\n" +
+          "FROM solicitudes s\n" +
+          "JOIN users u ON (s.user_data ->> 'id')::bigint = u.id where s.solicitud_id\t = $1;",
+          [solicitudId]
+      );
+      if (solicitudData.rows.length === 0) {
+        return res.status(404).json({message: "Solicitud no encontrada"});
+      }
+      res.json(solicitudData.rows[0]);
+    } catch (error) {
+      console.error("Error al obtener la solicitud:", error);
+      res.status(500).json({error: "Error al obtener la solicitud"});
+    }
+  });
+
 
 
