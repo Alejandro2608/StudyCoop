@@ -5,6 +5,9 @@ const passport = require("passport");
 const flash = require("express-flash");
 const session = require("express-session");
 const path = require('path');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const bodyParser = require('body-parser');
 require("dotenv").config();
 const app = express();
 
@@ -18,6 +21,10 @@ initializePassport(passport);
 app.use(express.static(path.join(__dirname, 'public')));
 // Parsea los detalles de un formulario
 app.use(express.urlencoded({ extended: false }));
+
+app.use(bodyParser.json());
+
+app.use(bodyParser.urlencoded({ extended: true }));
 
 app.set("view engine", "ejs");
 
@@ -45,48 +52,69 @@ app.get("/", (req, res) => {
   res.render("index");
 });
 
-app.get("/users/register", checkAuthenticated, (req, res) => {
+app.get("/users/reset-password", (req, res) => {
+  res.render("restablecerpass.ejs");
+});
+
+app.get('/users/reset-password/:token', (req, res) => {
+  const { token } = req.params;
+  res.render('restablecerpass-token', { token });
+});
+
+app.get("/users/register", (req, res) => {
   res.render("register.ejs");
-});
-
-app.get("/users/homepage", checkAuthenticated, (req, res) => {
-  res.render("homepage.ejs");
-});
-
-app.get("/users/registrarservicio", (req, res) => {
-  res.render("registrarservicio.ejs", { user: req.user });
-});
-
-
-app.get("/users/reservas/:id", (req, res) => {
-  res.render("reservas.ejs", { user: req.user, id: req.params.id });
 });
 
 app.get("/users/profile", checkNotAuthenticated, (req, res) => {
   res.render("profile.ejs", { user: req.user });
 });
 
-app.get("/users/solicitarservicio", (req, res) => {
-  res.render("solicitarservicio.ejs");
+// Endpoint para obtener las agendas de una publicación específica
+app.get("/api/agendas-publicacion/:solicitud_id", async (req, res) => {
+  const { solicitud_id } = req.params;
+  try {
+    const result = await pool.query(
+      `SELECT user_name FROM agendas WHERE tema = (
+         SELECT tema_interes FROM solicitudes WHERE solicitud_id = $1
+       )`,
+      [solicitud_id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Error al obtener las agendas de la publicación:", err);
+    res.status(500).send("Error al obtener las agendas de la publicación");
+  }
 });
 
 
-/*app.get("/solicitud/visualizar", (req, res) => {
-  res.render("visualizarservicio.ejs");
-});*/
+app.get("/users/reservas/:id", async (req, res) => {
+  try {
+    const solicitudId = req.params.id;
+    const result = await pool.query('SELECT * FROM solicitudes WHERE solicitud_id = $1', [solicitudId]);
+    const solicitud = result.rows[0];
 
-app.get("/users/login", checkAuthenticated, (req, res) => {
-  // flash establece una variable de mensajes. Passport establece el mensaje de error
+    if (!solicitud) {
+      return res.status(404).send('Solicitud no encontrada');
+    }
+
+    res.render("reservas.ejs", { user: req.user, solicitud: solicitud });
+  } catch (error) {
+    console.error('Error fetching solicitud:', error);
+    res.status(500).send('Error del servidor');
+  }
+});
+
+
+app.get("/users/login", (req, res) => {
   const errors = req.flash('error');
   res.render("login.ejs", { errors: errors || [] });
 });
+
 app.get("/users/dashboard", checkNotAuthenticated, (req, res) => {
-  console.log(req.isAuthenticated());
   res.render("dashboard", { user: req.user });
 });
 
 app.get("/users/logout", checkNotAuthenticated, (req, res) => {
-  console.log(req.isAuthenticated());
   res.render("dashboard", { user: req.user });
 });
 
@@ -97,27 +125,93 @@ app.get('/logout', (req, res) => {
       console.error("Error al cerrar sesión:", err);
       return res.status(500).send("Error al cerrar sesión");
     }
-    // Redireccionar al usuario a la página de inicio de sesión después de cerrar sesión
     res.redirect('/users/login');
   });
+});
+
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: 'manuuflorez1@gmail.com',
+    pass: 'qslb timx xdni mogo'
+  }
+});
+
+// Ruta para solicitar el restablecimiento de contraseña
+app.post("/users/reset-password", async (req, res) => {
+  const { email } = req.body;
+  const token = crypto.randomBytes(20).toString('hex');
+
+  try {
+    await pool.query(
+      "INSERT INTO password_resets (email, token) VALUES ($1, $2)",
+      [email, token]
+    );
+
+    // Envía el correo electrónico con el token de restablecimiento
+    const resetLink = `http://localhost:3000/users/reset-password/${token}`;
+    const mailOptions = {
+      from: 'manuuflorez1@gmail.com',
+      to: email,
+      subject: 'Solicitud de restablecimiento de contraseña para StudyCoop',
+      text: `Has solicitado un restablecimiento de contraseña. Utiliza el siguiente enlace para restablecer tu contraseña: ${resetLink}`,
+      html: `<p>Has solicitado un restablecimiento de contraseña. Utiliza el siguiente enlace para restablecer tu contraseña:</p><a href="${resetLink}">Restablecer Contraseña</a>`
+    };
+
+    await transporter.sendMail(mailOptions);
+    res.json({ message: "¡Correo electrónico enviado para el restablecimiento de contraseña!" });
+  } catch (error) {
+    console.error("Error al solicitar el restablecimiento de contraseña:", error);
+    res.status(500).json({ error: "Error al solicitar el restablecimiento de contraseña" });
+  }
+});
+
+
+
+// Ruta para restablecer la contraseña
+app.post("/users/reset-password/:token", async (req, res) => {
+  const { token } = req.params;
+  const { password, confirm_password } = req.body;
+
+  if (password !== confirm_password) {
+    return res.status(400).json({ error: "Las contraseñas no coinciden" });
+  }
+
+  try {
+    const result = await pool.query(
+      "SELECT * FROM password_resets WHERE token = $1",
+      [token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: "Este enlace ya ha vencido, token no valido." });
+    }
+
+    const email = result.rows[0].email;
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    await pool.query(
+      "UPDATE users SET password = $1 WHERE email = $2",
+      [hashedPassword, email]
+    );
+
+    // Elimina el token después de usarlo
+    await pool.query(
+      "DELETE FROM password_resets WHERE token = $1",
+      [token]
+    );
+
+    res.json({ message:"¡Contraseña actualizada correctamente!"});
+  } catch (error) {
+    console.error("Error al actualizar la contraseña:", error);
+    res.status(500).json({ error: "Error al actualizar la contraseña" });
+  }
 });
 
 app.post("/users/register", async (req, res) => {
   let { name, lastname, document_type, id_number, email, program, password, password2 } = req.body;
 
   let errors = [];
-
-  console.log({
-    name,
-    lastname,
-    document_type,
-    id_number,
-    email,
-    program,
-    password,
-    password2
-  });
-  //
 
   if (!name || !lastname || !document_type || !id_number || !email || !program || !password || !password2) {
     errors.push({ message: "Por favor completa todos los campos" });
@@ -141,7 +235,6 @@ app.post("/users/register", async (req, res) => {
     res.render("register", { errors, name, lastname, document_type, id_number, email, program, password, password2 });
   } else {
     hashedPassword = await bcrypt.hash(password, 10);
-    console.log(hashedPassword);
     // Validación superada
     pool.query(
       `SELECT * FROM users
@@ -151,7 +244,6 @@ app.post("/users/register", async (req, res) => {
         if (err) {
           console.log(err);
         }
-        console.log(results.rows);
 
         if (results.rows.length > 0) {
           return res.render("register", {
@@ -159,15 +251,14 @@ app.post("/users/register", async (req, res) => {
           });
         } else {
           pool.query(
-            `INSERT INTO users (name, lastname, document_type, id_number, email, program, password)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `INSERT INTO users (name, lastname, document_type, id_number, email, program, password, active)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 RETURNING id, password`,
-            [name, lastname, document_type, id_number, email, program, hashedPassword],
+            [name, lastname, document_type, id_number, email, program, hashedPassword, true], // Asegúrate de establecer active en true
             (err, results) => {
               if (err) {
                 throw err;
               }
-              console.log(results.rows);
               req.flash("success_msg", "Te has registrado correctamente, inicia sesión");
               res.redirect("/users/login");
             }
@@ -181,8 +272,48 @@ app.post("/users/register", async (req, res) => {
 // Actualizar user
 app.post("/users/update/:id", async (req, res) => {
   const userId = req.params.id;
-  const { name, lastname, document_type, id_number, program } = req.body;
-  const { password, email } = req.user
+  let name, lastname, document_type, id_number, program, email, password, active;
+
+  // Verifica los campos enviados en la solicitud y actualiza las variables correspondientes
+  if (req.body.newPassword) {
+    const { name: userName, lastname: userLastname, document_type: userDocumentType, id_number: userIdNumber, program: userProgram, email: userEmail, active } = req.user;
+    const { newPassword, oldPassword, confirmPassword } = req.body;
+
+    // Verifica si la nueva contraseña y la confirmación de la contraseña son iguales
+    if (newPassword !== confirmPassword) {
+      console.log("La nueva contraseña y la confirmación de la contraseña no coinciden");
+    }
+
+    name = userName;
+    lastname = userLastname;
+    document_type = userDocumentType;
+    id_number = userIdNumber;
+    program = userProgram;
+    email = userEmail;
+    password = newPassword;
+
+  } else if (req.body.email) {
+    const { name: userName, lastname: userLastname, document_type: userDocumentType, id_number: userIdNumber, program: userProgram, password: userPassword, active } = req.user;
+    const { email: userEmail } = req.body;
+    name = userName;
+    lastname = userLastname;
+    document_type = userDocumentType;
+    id_number = userIdNumber;
+    program = userProgram;
+    email = userEmail;
+    password = userPassword;
+  } else {
+    const { name: userName, lastname: userLastname, document_type: userDocumentType, id_number: userIdNumber, program: userProgram } = req.body;
+    const { password: userPassword, email: userEmail, active } = req.user;
+    name = userName;
+    lastname = userLastname;
+    document_type = userDocumentType;
+    id_number = userIdNumber;
+    program = userProgram;
+    email = userEmail;
+    password = userPassword;
+  }
+
   try {
     // Verifica si el usuario existe
     const userExists = await pool.query(
@@ -192,6 +323,46 @@ app.post("/users/update/:id", async (req, res) => {
 
     if (userExists.rows.length === 0) {
       return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    const userData = userExists.rows[0];
+
+    // Verifica si se proporciona una nueva contraseña
+    if (req.body.newPassword) {
+      const { oldPassword, newPassword } = req.body;
+
+      // Verifica si la contraseña anterior coincide con la almacenada en la base de datos
+      const passwordMatch = await bcrypt.compare(oldPassword, userData.password);
+
+      if (!passwordMatch) {
+        // Si la contraseña anterior no coincide, devuelve un mensaje de error
+        return res.json({ success: false, message: "La contraseña no coincide" });
+      }
+
+      // Si la contraseña anterior coincide, actualiza la contraseña
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      password = hashedPassword; // Actualiza la contraseña con la nueva contraseña hasheada
+    }
+
+    // Verifica si la cuenta está activa o desactivada
+    if (active !== undefined) {
+      // Actualiza el campo 'active'
+      await pool.query(
+        "UPDATE users SET active = $1 WHERE id = $2",
+        [active, userId]
+      );
+    }
+
+    if (req.body.email) {
+      const { oldPassword } = req.body;
+
+      // Verifica si la contraseña anterior coincide con la almacenada en la base de datos
+      const passwordMatch = await bcrypt.compare(oldPassword, userData.password);
+
+      if (!passwordMatch) {
+        // Si la contraseña anterior no coincide, devuelve un mensaje de error
+        return res.json({ success: false, message: "La contraseña no coincide" });
+      }
     }
 
     // Actualiza los datos del usuario
@@ -206,13 +377,32 @@ app.post("/users/update/:id", async (req, res) => {
   }
 });
 
+app.post("/users/deactivate/:id", async (req, res) => {
+  const userId = req.params.id;
+
+  try {
+    // Actualiza el valor 'active' a false en la base de datos
+    await pool.query(
+      "UPDATE users SET active = false WHERE id = $1",
+      [userId]
+    );
+
+    req.flash("success_msg", "Tu cuenta ha sido desactivada exitosamente");
+    res.redirect("/users/login"); // Redirecciona a la página de inicio de sesión u otra página
+  } catch (error) {
+    console.error("Error al desactivar la cuenta:", error);
+    res.status(500).json({ error: "Error al desactivar la cuenta" });
+  }
+});
+
+
 app.get("/dashboard/publicar", async (req, res) => {
-  res.render("dashboard.ejs"); // Renderiza el formulario de publicación en el dashboard
+  res.render("dashboard.ejs", { user: req.user }); // Renderiza el formulario de publicación en el dashboard
 });
 
 // Dentro del endpoint de publicación de solicitudes
 app.post("/dashboard/publicar", (req, res) => {
-  const { tipo, materia, tema, fecha } = req.body;
+  const { tipo, materia, tema, fecha, hora } = req.body; // Añadir hora aquí
   const usuario_id = req.user.id;
 
   // Construir el objeto JSON con los datos del usuario
@@ -229,10 +419,10 @@ app.post("/dashboard/publicar", (req, res) => {
 
   // Insertar la nueva solicitud en la base de datos
   pool.query(
-    `INSERT INTO solicitudes (user_data, tipo_servicio, materia, tema_interes, fecha_reunion)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO solicitudes (user_data, tipo_servicio, materia, tema_interes, fecha_reunion, hora)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING solicitud_id`,
-    [userData, tipo, materia, tema, fecha],
+    [userData, tipo, materia, tema, fecha, hora], // Añadir hora aquí
     (err, results) => {
       if (err) {
         console.error("Error al insertar solicitud:", err);
@@ -245,6 +435,7 @@ app.post("/dashboard/publicar", (req, res) => {
     }
   );
 });
+
 
 // Eliminar una publicación por su ID
 app.delete('/api/eliminar-publicacion/:id', async (req, res) => {
@@ -408,25 +599,48 @@ app.get("/api/search", async (req, res) => {
 });
 
 
-app.post(
-  "/users/login",
-  passport.authenticate("local", {
-    successRedirect: "/users/dashboard",
-    failureRedirect: "/users/login",
-    failureFlash: true
-  })
-);
+app.post("/users/login", (req, res, next) => {
+  passport.authenticate("local", (err, user, info) => {
+    if (err) {
+      return next(err);
+    }
+    if (!user) {
+      return res.render("login", { errors: [{ message: info.message }] });
+    }
+    req.logIn(user, (err) => {
+      if (err) {
+        return next(err);
+      }
+      if (!user.active) {
+        return res.render("login", { errors: [{ message: "Tu cuenta está desactivada. Por favor, contacta al administrador." }] });
+      }
+      return res.redirect("/users/dashboard");
+    });
+  })(req, res, next);
+});
 
 function checkAuthenticated(req, res, next) {
   if (req.isAuthenticated()) {
-    return res.redirect("/users/dashboard");
+    // Verificar si la cuenta está activa
+    if (req.user.active) {
+      return res.redirect("/users/dashboard");
+    } else {
+      req.flash("error_msg", "Tu cuenta está desactivada. Por favor, contáctanos para obtener ayuda.");
+      return res.redirect("/users/login");
+    }
   }
   next();
 }
 
 function checkNotAuthenticated(req, res, next) {
   if (req.isAuthenticated()) {
-    return next();
+    // Verificar si la cuenta está activa
+    if (req.user.active) {
+      return next();
+    } else {
+      req.flash("error_msg", "Tu cuenta está desactivada. Por favor, contáctanos para obtener ayuda.");
+      return res.redirect("/users/login");
+    }
   }
   res.redirect("/users/login");
 }
@@ -441,41 +655,83 @@ app.get("/api/infouser/:id", async (req, res) => {
 
   try {
     const userData = await pool.query(
-        "SELECT * FROM users WHERE id = $1;",
-        [userId]
+      "SELECT * FROM users WHERE id = $1;",
+      [userId]
     );
 
     if (userData.rows.length === 0) {
-      return res.status(404).json({message: "Usuario no encontrado"});
+      return res.status(404).json({ message: "Usuario no encontrado" });
     }
 
     res.json(userData.rows[0]);
   } catch (error) {
     console.error("Error al obtener información del usuario:", error);
-    res.status(500).json({error: "Error al obtener información del usuario"});
+    res.status(500).json({ error: "Error al obtener información del usuario" });
   }
 });
 
+app.get("/api/solicitudById/:id", async (req, res) => {
+  const solicitudId = req.params.id;
 
-  app.get("/api/solicitudById/:id", async (req, res) => {
-    const solicitudId = req.params.id;
-
-    try {
-      const solicitudData = await pool.query(
-          "SELECT s.solicitud_id, s.materia, s.tema_interes, s.fecha_reunion, s.user_data  -> 'id' as idPersona\n" +
-          "FROM solicitudes s\n" +
-          "JOIN users u ON (s.user_data ->> 'id')::bigint = u.id where s.solicitud_id\t = $1;",
-          [solicitudId]
-      );
-      if (solicitudData.rows.length === 0) {
-        return res.status(404).json({message: "Solicitud no encontrada"});
-      }
-      res.json(solicitudData.rows[0]);
-    } catch (error) {
-      console.error("Error al obtener la solicitud:", error);
-      res.status(500).json({error: "Error al obtener la solicitud"});
+  try {
+    const solicitudData = await pool.query(
+        "SELECT s.solicitud_id, s.materia, s.tema_interes, s.fecha_reunion, s.user_data  -> 'id' as idPersona\n" +
+        "FROM solicitudes s\n" +
+        "JOIN users u ON (s.user_data ->> 'id')::bigint = u.id where s.solicitud_id\t = $1;",
+        [solicitudId]
+    );
+    if (solicitudData.rows.length === 0) {
+      return res.status(404).json({message: "Solicitud no encontrada"});
     }
-  });
+    res.json(solicitudData.rows[0]);
+  } catch (error) {
+    console.error("Error al obtener la solicitud:", error);
+    res.status(500).json({error: "Error al obtener la solicitud"});
+  }
+});
 
+app.post('/agendar', async (req, res) => {
+  const { userName, userEmail, tema, fecha, hora, tutor, pago } = req.body; // Añadir hora aquí
 
+  try {
+    const query = `
+      INSERT INTO agendas (user_name, user_email, tema, fecha, hora, tutor, pago)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `;
+    await pool.query(query, [userName, userEmail, tema, fecha, hora, tutor, pago]); // Añadir hora aquí
+    res.status(200).send('Agendado con éxito');
+  } catch (error) {
+    console.error('Error agendando:', error);
+    res.status(500).send('Error al agendar');
+  }
+});
 
+// Endpoint para obtener las calificaciones y comentarios
+app.get("/api/calificaciones/:solicitud_id", async (req, res) => {
+  const { solicitud_id } = req.params;
+  try {
+    const result = await pool.query(
+      "SELECT comentario, calificacion, user_name FROM agendas_finalizadas WHERE solicitud_id = $1",
+      [solicitud_id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Error al obtener las calificaciones y comentarios:", err);
+    res.status(500).send("Error al obtener las calificaciones y comentarios");
+  }
+});
+
+// Endpoint para guardar calificaciones y comentarios
+app.post("/api/calificar", async (req, res) => {
+  const { solicitud_id, comentario, calificacion, user_name, user_email, tema, fecha, tutor, pago, hora } = req.body;
+  try {
+    const result = await pool.query(
+      "INSERT INTO agendas_finalizadas (solicitud_id, comentario, calificacion, user_name, user_email, tema, fecha, tutor, pago, hora) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+      [solicitud_id, comentario, calificacion, user_name, user_email, tema, fecha, tutor, pago, hora]
+    );
+    res.status(201).json({ message: "Calificación y comentario guardados exitosamente" });
+  } catch (err) {
+    console.error("Error al guardar la calificación y comentario:", err);
+    res.status(500).send("Error al guardar la calificación y comentario");
+  }
+});
